@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Ocean Way - Guaranteed Green Hotspot Collection</title>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" />
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.2.1/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="../css/monitoring.css" />
+</head>
+<body>
+
+<header>
+  Ocean Way Submarine Dashboard
+</header>
+<main>
+  <!-- Left side: Map -->
+  <div class="map-container">
+    <div id="map"></div>
+  </div>
+
+  <!-- Right side: Data panel -->
+  <div class="data-panel">
+    <!-- Submarine Status Box -->
+    <div class="info-box">
+      <h2>Submarine Status</h2>
+      <p><strong>ID:</strong> <span id="sub-id">N/A</span></p>
+      <p><strong>Location:</strong>
+        <span id="sub-lat">N/A</span>,
+        <span id="sub-lng">N/A</span>
+      </p>
+      <p><strong>Battery Level:</strong>
+        <span id="sub-battery">N/A</span>%
+        <div class="battery-bar">
+          <div id="battery-progress" class="progress"></div>
+        </div>
+      </p>
+      <p><strong>Speed:</strong> <span id="sub-speed">N/A</span> m/s</p>
+      <p><strong>Ocean:</strong> <span id="sub-ocean">N/A</span></p>
+    </div>
+
+    <!-- Telemetry over time -->
+    <div class="info-box">
+      <h2>Telemetry Over Time</h2>
+      <canvas id="telemetry-chart"></canvas>
+      <div id="chart-controls">
+        <button class="chart-toggle" data-dataset="0">Toggle Battery</button>
+        <button class="chart-toggle" data-dataset="1">Toggle Speed</button>
+        <button class="chart-toggle" data-dataset="2">Toggle Plastic</button>
+      </div>
+    </div>
+
+    <!-- Notifications -->
+    <div class="info-box">
+      <h2>Notifications</h2>
+      <div id="notifications"></div>
+    </div>
+  </div>
+</main>
+
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"></script>
+<script>
+/*
+  -------------------------------------------------------------------
+  1. MAP INITIALIZATION (Leaflet)
+  -------------------------------------------------------------------
+*/
+const map = L.map("map").setView([20, 0], 2);
+
+// Add a base tile layer (OpenStreetMap)
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 20,
+  attribution: '&copy; <a href="#">OceanWay</a> contributors',
+}).addTo(map);
+
+/*
+  -------------------------------------------------------------------
+  2. OCEAN BOUNDING BOXES (Approximate)
+  -------------------------------------------------------------------
+  Just used for "out-of-bounds" notifications, not forced turn-around.
+*/
+const oceans = [
+  { name: "Pacific Ocean",   latMin: -50, latMax: 50,  lngMin: -180, lngMax: -100 },
+  { name: "Atlantic Ocean",  latMin: -40, latMax: 40,  lngMin: -70,  lngMax: -20  },
+  { name: "Indian Ocean",    latMin: -40, latMax: 10,  lngMin: 20,   lngMax: 100  },
+  { name: "Southern Ocean",  latMin: -60, latMax: -50, lngMin: -180, lngMax: 180  },
+];
+
+/*
+  -------------------------------------------------------------------
+  3. HOTSPOT DATA
+  -------------------------------------------------------------------
+  We'll have 4 hotspots placed around the globe. Each has random waste
+  size (50–300 kg), starts red, and becomes green upon collection.
+*/
+const hotspots = [
+  // Each is "uncollected" and unassigned initially.
+  { id: "North Pacific Gyre",  lat: 30,  lng: -150, wasteSize: 0, collected: false, assignedSubmarine: null },
+  { id: "South Pacific Gyre",  lat: -30, lng: -130, wasteSize: 0, collected: false, assignedSubmarine: null },
+  { id: "North Atlantic Gyre", lat: 30,  lng: -50,  wasteSize: 0, collected: false, assignedSubmarine: null },
+  { id: "Indian Ocean Gyre",   lat: -20, lng: 80,   wasteSize: 0, collected: false, assignedSubmarine: null },
+];
+
+// Assign random waste size and add them to the map
+hotspots.forEach((ht) => {
+  ht.wasteSize = Math.floor(Math.random() * 251) + 50; // 50–300
+  ht.marker = L.circleMarker([ht.lat, ht.lng], {
+    radius: 8,
+    color: "red",
+    fillColor: "red",
+    fillOpacity: 0.7,
+  })
+    .addTo(map)
+    .bindPopup(`
+      <strong>${ht.id}</strong><br>
+      Location: (${ht.lat}, ${ht.lng})<br>
+      Waste Size: ${ht.wasteSize} kg<br>
+      Status: Uncollected
+    `);
+});
+
+/*
+  -------------------------------------------------------------------
+  4. SUBMARINE DATA
+  -------------------------------------------------------------------
+  We *explicitly* place each submarine near a different hotspot so
+  that you can *definitely* watch them collect and turn the hotspot green.
+*/
+const submarineIconDefault = L.icon({
+  iconUrl: "../resources/3190967.png",
+  iconSize: [40, 40],
+  iconAnchor: [20, 20],
+  popupAnchor: [0, -20],
+});
+
+// We'll place each submarine roughly 5–10 degrees away from a hotspot.
+const submarines = [
+  { id: "Submarine 001", speed: 100000, battery: 100,
+    lat: 25, lng: -155, // ~5 deg away from North Pacific Gyre
+  },
+  { id: "Submarine 002", speed: 80000, battery: 100,
+    lat: -35, lng: -125, // ~5 deg away from South Pacific Gyre
+  },
+  { id: "Submarine 003", speed: 12000, battery: 100,
+    lat: 25, lng: -55,  // ~5 deg away from North Atlantic Gyre
+  },
+ 
+];
+
+// Initialize each sub's marker, polyline, etc.
+submarines.forEach((sub) => {
+  sub.direction = Math.random() * 360; // random bearing
+  sub.targetHotspot = null;
+  sub.plasticCollected = 0;
+
+  sub.marker = L.marker([sub.lat, sub.lng], { icon: submarineIconDefault }).addTo(map);
+  sub.trail = L.polyline([], { color: "red", weight: 2 }).addTo(map);
+
+  sub.marker.on("click", () => {
+    selectedSubmarine = sub;
+    updateDashboard(selectedSubmarine);
+  });
+});
+
+let selectedSubmarine = null;
+
+/*
+  -------------------------------------------------------------------
+  5. HELPER FUNCTIONS: CALCULATE BEARING, ASSIGN HOTSPOT
+  -------------------------------------------------------------------
+*/
+function calculateBearing(startLL, endLL) {
+  const lat1 = (startLL.lat * Math.PI) / 180;
+  const lat2 = (endLL.lat * Math.PI) / 180;
+  const dLng = ((endLL.lng - startLL.lng) * Math.PI) / 180;
+
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+
+  let brng = (Math.atan2(y, x) * 180) / Math.PI;
+  return (brng + 360) % 360; // 0..360
+}
+
+// Each submarine picks the nearest uncollected & unassigned hotspot
+function assignSubmarineToHotspot(sub) {
+  let closest = null;
+  let minDist = Infinity;
+
+  const subLL = L.latLng(sub.lat, sub.lng);
+  hotspots.forEach((ht) => {
+    if (!ht.collected && ht.assignedSubmarine === null) {
+      const hotLL = L.latLng(ht.lat, ht.lng);
+      const dist = subLL.distanceTo(hotLL);
+      if (dist < minDist) {
+        minDist = dist;
+        closest = ht;
+      }
+    }
+  });
+
+  if (closest) {
+    closest.assignedSubmarine = sub.id;
+    sub.targetHotspot = closest;
+  } else {
+    sub.targetHotspot = null;
+  }
+}
+
+/*
+  -------------------------------------------------------------------
+  6. SIMULATE SUBMARINE MOVEMENT
+  -------------------------------------------------------------------
+  - Recalculate bearing every update if there's a target.
+  - If within 5 km, collect hotspot => turn green, add plastic.
+*/
+const EARTH_RADIUS_M = 6371000;
+function simulateSubmarineMovement(sub, dt = 1) {
+  // If we have a target, recalc bearing
+  if (sub.targetHotspot) {
+    const subLL = L.latLng(sub.lat, sub.lng);
+    const hotLL = L.latLng(sub.targetHotspot.lat, sub.targetHotspot.lng);
+    sub.direction = calculateBearing(subLL, hotLL);
+  }
+
+  // Convert speed (m/s) to degrees
+  const rad = (sub.direction * Math.PI) / 180;
+  const distTraveled = sub.speed * dt; // m
+  const deltaDeg = (distTraveled / EARTH_RADIUS_M) * (180 / Math.PI);
+
+  // Bearing: 0=north, 90=east, etc.
+  const dLat = Math.cos(rad) * deltaDeg;
+  const dLng = Math.sin(rad) * deltaDeg;
+
+  sub.lat += dLat;
+  sub.lng += dLng;
+
+  // Check distance to hotspot
+  if (sub.targetHotspot) {
+    const subLL = L.latLng(sub.lat, sub.lng);
+    const hotLL = L.latLng(sub.targetHotspot.lat, sub.targetHotspot.lng);
+    const dist = subLL.distanceTo(hotLL);
+
+    // If within 5 km => collect
+    if (dist < 50009) {
+      sub.targetHotspot.collected = true;
+      sub.plasticCollected += sub.targetHotspot.wasteSize;
+
+      // Turn hotspot green
+      sub.targetHotspot.marker.setStyle({ color: "green", fillColor: "green" });
+      sub.targetHotspot.marker.bindPopup(`
+        <strong>${sub.targetHotspot.id}</strong><br>
+        Location: (${sub.targetHotspot.lat}, ${sub.targetHotspot.lng})<br>
+        Waste Size: ${sub.targetHotspot.wasteSize} kg<br>
+        Status: Collected
+      `);
+
+      // Clear assignment
+      sub.targetHotspot.assignedSubmarine = null;
+      sub.targetHotspot = null;
+    }
+  }
+
+  // Update marker, trail, battery
+  sub.marker.setLatLng([sub.lat, sub.lng]);
+  sub.trail.addLatLng([sub.lat, sub.lng]);
+  sub.battery = Math.max(0, sub.battery - Math.random() * 0.1);
+
+  // Update popup
+  sub.marker.setPopupContent(`
+    <div>
+      <strong>${sub.id}</strong><br>
+      Location: (${sub.lat.toFixed(3)}, ${sub.lng.toFixed(3)})<br>
+      Speed: ${sub.speed.toFixed(2)} m/s<br>
+      Battery: ${sub.battery.toFixed(1)}%<br>
+      Plastic Collected: ${sub.plasticCollected} kg
+    </div>
+  `);
+}
+
+/*
+  -------------------------------------------------------------------
+  7. CHECK FOR CRITICAL EVENTS
+  -------------------------------------------------------------------
+  - Low battery (<20%)
+  - Out of known oceans => "out of bounds" notification
+*/
+function checkForCriticalEvents(sub) {
+  const notificationsElement = document.getElementById("notifications");
+  if (notificationsElement.children.length > 10) {
+    notificationsElement.innerHTML = "";
+  }
+
+  // Low battery
+  if (sub.battery < 20) {
+    const n = document.createElement("div");
+    n.className = "notification";
+    n.textContent = `${sub.id} has low battery (${sub.battery.toFixed(1)}%)!`;
+    notificationsElement.appendChild(n);
+  }
+
+  // Out of known oceans
+  const inOcean = oceans.find(
+    (o) =>
+      sub.lat >= o.latMin && sub.lat <= o.latMax &&
+      sub.lng >= o.lngMin && sub.lng <= o.lngMax
+  );
+  if (!inOcean) {
+    const n = document.createElement("div");
+    n.className = "notification";
+    n.textContent = `${sub.id} is out of bounds (not in any listed ocean)!`;
+    notificationsElement.appendChild(n);
+  }
+}
+
+/*
+  -------------------------------------------------------------------
+  8. CHART.JS INIT
+  -------------------------------------------------------------------
+*/
+const ctx = document.getElementById("telemetry-chart").getContext("2d");
+
+const gradientBattery = ctx.createLinearGradient(0, 0, 0, 400);
+gradientBattery.addColorStop(0, "rgba(0, 255, 0, 0.6)");
+gradientBattery.addColorStop(1, "rgba(255, 0, 0, 0.6)");
+
+const gradientSpeed = ctx.createLinearGradient(0, 0, 0, 400);
+gradientSpeed.addColorStop(0, "rgba(0, 128, 255, 0.6)");
+gradientSpeed.addColorStop(1, "rgba(255, 165, 0, 0.6)");
+
+const telemetryChart = new Chart(ctx, {
+  type: "line",
+  data: {
+    labels: [],
+    datasets: [
+      {
+        label: "Battery (%)",
+        data: [],
+        borderColor: "teal",
+        backgroundColor: gradientBattery,
+        fill: true,
+      },
+      {
+        label: "Speed (m/s)",
+        data: [],
+        borderColor: "#ff6600",
+        backgroundColor: gradientSpeed,
+        fill: true,
+      },
+      {
+        label: "Plastic Collected (kg)",
+        data: [],
+        borderColor: "purple",
+        backgroundColor: "rgba(128,0,128,0.1)",
+        fill: true,
+      },
+    ],
+  },
+  options: {
+    responsive: true,
+    plugins: {
+      legend: {
+        display: true,
+        labels: {
+          color: "#333",
+        },
+      },
+      tooltip: {
+        mode: "index",
+        intersect: false,
+      },
+    },
+    interaction: {
+      mode: "index",
+      intersect: false,
+    },
+    scales: {
+      x: { ticks: { color: "#333" } },
+      y: {
+        ticks: { color: "#333" },
+        suggestedMin: 0,
+        suggestedMax: 100,
+      },
+    },
+  },
+});
+
+// Toggle dataset visibility
+document.querySelectorAll(".chart-toggle").forEach((button) => {
+  button.addEventListener("click", (e) => {
+    const dsIndex = e.target.dataset.dataset;
+    telemetryChart.data.datasets[dsIndex].hidden =
+      !telemetryChart.data.datasets[dsIndex].hidden;
+    telemetryChart.update();
+  });
+});
+
+/*
+  -------------------------------------------------------------------
+  9. UPDATE DASHBOARD & CHART
+  -------------------------------------------------------------------
+*/
+function updateDashboard(sub) {
+  // Status info
+  document.getElementById("sub-id").textContent = sub.id;
+  document.getElementById("sub-lat").textContent = sub.lat.toFixed(3);
+  document.getElementById("sub-lng").textContent = sub.lng.toFixed(3);
+  document.getElementById("sub-battery").textContent = sub.battery.toFixed(1);
+  document.getElementById("sub-speed").textContent = sub.speed.toFixed(2);
+
+  // Which ocean?
+  const ocean = oceans.find(
+    (o) =>
+      sub.lat >= o.latMin &&
+      sub.lat <= o.latMax &&
+      sub.lng >= o.lngMin &&
+      sub.lng <= o.lngMax
+  );
+  document.getElementById("sub-ocean").textContent = ocean ? ocean.name : "Unknown";
+
+  // Battery bar
+  const batteryProgress = document.getElementById("battery-progress");
+  batteryProgress.style.width = `${sub.battery}%`;
+  batteryProgress.className = "progress";
+  if (sub.battery <= 20) {
+    batteryProgress.classList.add("low");
+  } else if (sub.battery <= 50) {
+    batteryProgress.classList.add("medium");
+  } else {
+    batteryProgress.classList.add("high");
+  }
+
+  // Update Chart
+  const currentTime = new Date().toLocaleTimeString();
+  telemetryChart.data.labels.push(currentTime);
+  telemetryChart.data.datasets[0].data.push(sub.battery);
+  telemetryChart.data.datasets[1].data.push(sub.speed);
+  telemetryChart.data.datasets[2].data.push(sub.plasticCollected);
+
+  // Keep last 15 points
+  if (telemetryChart.data.labels.length > 15) {
+    telemetryChart.data.labels.shift();
+    telemetryChart.data.datasets.forEach((ds) => ds.data.shift());
+  }
+  telemetryChart.update();
+}
+
+/*
+  -------------------------------------------------------------------
+  10. MAIN SIMULATION LOOP
+  -------------------------------------------------------------------
+*/
+function mainSimulationLoop() {
+  submarines.forEach((sub) => {
+    // If no target, find one
+    if (!sub.targetHotspot) {
+      assignSubmarineToHotspot(sub);
+    }
+    // Move
+    simulateSubmarineMovement(sub);
+    // Check events
+    checkForCriticalEvents(sub);
+  });
+
+  // Update dashboard if a sub is selected
+  if (selectedSubmarine) {
+    updateDashboard(selectedSubmarine);
+  }
+}
+
+const simulationInterval = setInterval(mainSimulationLoop, 1000);
+
+/*
+  -------------------------------------------------------------------
+  11. CLEANUP (OPTIONAL)
+  -------------------------------------------------------------------
+*/
+window.addEventListener("beforeunload", () => {
+  clearInterval(simulationInterval);
+});
+</script>
+</body>
+</html>
